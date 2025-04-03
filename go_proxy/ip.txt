@@ -1,0 +1,17 @@
+# 代理列表，格式：
+# http://用户名:密码@主机:端口
+# socks5://用户名:密码@主机:端口
+
+# HTTP代理 - 需要用户名密码认证的HTTP代理
+http://uhizaxwJ:6AyK4PobvFMJYXGp@us.proxy302.com:2222
+http://Cm7VpZz7:xAwtMSIZZTLK2iAz@proxy.proxy302.com:2222
+
+# SOCKS5代理 - 需要用户名密码认证的SOCKS5代理
+socks5://mInvsFwP:J0EDWts6ou881yGH@proxy.proxy302.com:3333
+
+# 本地测试用的SOCKS5代理 - 如果你有本地代理可以使用这个进行测试
+# 确保你的本地代理是正确配置的
+# socks5://test:test123@127.0.0.1:1080
+
+# 无认证SOCKS5代理示例 - 如果你有不需要认证的SOCKS5代理
+# socks5://127.0.0.1:1080

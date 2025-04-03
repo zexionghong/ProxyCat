@@ -1,4 +1,3 @@
-socks5://127.0.0.1:7890
 http://uhizaxwJ:6AyK4PobvFMJYXGp@us.proxy302.com:2222
 http://Cm7VpZz7:xAwtMSIZZTLK2iAz@proxy.proxy302.com:2222
 http://u781JRNT:4dYtiuicKDMsUdtT@proxy.proxy302.com:2222

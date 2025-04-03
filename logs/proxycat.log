@@ -1,0 +1,42 @@
+2025-04-03 15:02:37 - INFO - 网页控制面板地址: http://127.0.0.1:5000/web?token=honmashironeko
+2025-04-03 15:02:37 - INFO - 请使用浏览器访问上述地址来管理代理服务器
+2025-04-03 15:02:37 - INFO - 代理服务器运行在 0.0.0.0:1080
+2025-04-03 15:06:20 - ERROR - 没有有效的代理地址
+2025-04-03 15:07:39 - INFO - 切换到循环模式模式，从 config\ip.txt 加载代理列表
+2025-04-03 15:07:39 - INFO - 加载到 2 个代理
+2025-04-03 15:07:39 - INFO - 当前使用代理: http://127.0.0.1:7890
+2025-04-03 15:07:39 - ERROR - 检查代理时出错: There is no current event loop in thread 'Thread-276 (process_request_thread)'.
+2025-04-03 15:07:51 - INFO - 切换代理: http://127.0.0.1:7890 -> http://uhizaxwJ:6AyK4PobvFMJYXGp@us.proxy302.com:2222
+2025-04-03 15:08:41 - INFO - 新客户端连接 - IP: 127.0.0.1, 用户: k:123
+2025-04-03 15:09:17 - WARNING - 代理检查结果: http://uhizaxwJ:6AyK4PobvFMJYXGp@us.proxy302.com:2222 - 有效
+2025-04-03 15:11:41 - WARNING - 代理检查结果: http://uhizaxwJ:6AyK4PobvFMJYXGp@us.proxy302.com:2222 - 有效
+2025-04-03 15:13:09 - INFO - 切换到循环模式模式，从 config\ip.txt 加载代理列表
+2025-04-03 15:13:09 - INFO - 加载到 5 个代理
+2025-04-03 15:13:09 - INFO - 当前使用代理: http://127.0.0.1:7890
+2025-04-03 15:13:09 - ERROR - 检查代理时出错: There is no current event loop in thread 'Thread-907 (process_request_thread)'.
+2025-04-03 15:15:55 - INFO - 网页控制面板地址: http://127.0.0.1:5000/web?token=honmashironeko
+2025-04-03 15:15:55 - INFO - 请使用浏览器访问上述地址来管理代理服务器
+2025-04-03 15:15:55 - INFO - 代理服务器运行在 0.0.0.0:1080
+2025-04-03 15:15:58 - INFO - 新客户端连接 - IP: 127.0.0.1, 用户: k:123
+2025-04-03 15:16:00 - ERROR - 代理检测错误: http://127.0.0.1:7890 - Cannot run the event loop while another loop is running
+2025-04-03 15:16:04 - INFO - 切换代理: http://127.0.0.1:7890 -> http://uhizaxwJ:6AyK4PobvFMJYXGp@us.proxy302.com:2222
+2025-04-03 15:16:13 - INFO - 网页控制面板地址: http://127.0.0.1:5000/web?token=honmashironeko
+2025-04-03 15:16:13 - INFO - 请使用浏览器访问上述地址来管理代理服务器
+2025-04-03 15:16:13 - INFO - 代理服务器运行在 0.0.0.0:1080
+2025-04-03 15:16:16 - INFO - 新客户端连接 - IP: 127.0.0.1, 用户: k:123
+2025-04-03 15:16:22 - WARNING - 代理检查结果: http://127.0.0.1:7890 - 无效
+2025-04-03 15:16:26 - INFO - 切换代理: http://127.0.0.1:7890 -> http://uhizaxwJ:6AyK4PobvFMJYXGp@us.proxy302.com:2222
+2025-04-03 15:17:37 - WARNING - 代理检查结果: http://uhizaxwJ:6AyK4PobvFMJYXGp@us.proxy302.com:2222 - 有效
+2025-04-03 15:18:06 - INFO - 新客户端连接 - IP: 127.0.0.1, 用户: neko:123456
+2025-04-03 15:18:32 - INFO - 切换到循环模式模式，从 config\ip.txt 加载代理列表
+2025-04-03 15:18:32 - INFO - 加载到 6 个代理
+2025-04-03 15:18:32 - INFO - 当前使用代理: http://127.0.0.1:7890
+2025-04-03 15:18:32 - ERROR - 检查代理时出错: There is no current event loop in thread 'Thread-142 (process_request_thread)'.
+2025-04-03 15:18:37 - INFO - 切换代理: socks5://127.0.0.1:7890 -> http://uhizaxwJ:6AyK4PobvFMJYXGp@us.proxy302.com:2222
+2025-04-03 15:18:45 - WARNING - 代理检查结果: http://uhizaxwJ:6AyK4PobvFMJYXGp@us.proxy302.com:2222 - 有效
+2025-04-03 15:19:41 - INFO - 网页控制面板地址: http://127.0.0.1:5000/web?token=honmashironeko
+2025-04-03 15:19:41 - INFO - 请使用浏览器访问上述地址来管理代理服务器
+2025-04-03 15:19:41 - INFO - 代理服务器运行在 0.0.0.0:1080
+2025-04-03 15:19:43 - INFO - 新客户端连接 - IP: 127.0.0.1, 用户: neko:123456
+2025-04-03 15:19:48 - WARNING - 代理检查结果: socks5://127.0.0.1:7890 - 无效
+2025-04-03 15:19:48 - INFO - 切换代理: socks5://127.0.0.1:7890 -> http://uhizaxwJ:6AyK4PobvFMJYXGp@us.proxy302.com:2222

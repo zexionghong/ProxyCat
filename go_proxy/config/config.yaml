@@ -1,0 +1,23 @@
+server:
+  display_level: 1
+  port: 5003
+  web_port: 5000
+  mode: "cycle"  # cycle, loadbalance
+  interval: 300
+  use_getip: false
+  getip_url: "http://example.com/getip"
+  proxy_username: ""
+  proxy_password: ""
+  proxy_file: "ip.txt"
+  check_proxies: true
+  test_url: ""
+  language: "cn"
+  whitelist_file: "whitelist.txt"
+  blacklist_file: "blacklist.txt"
+  ip_auth_priority: "whitelist"
+  token: "honmashironeko"
+  direct_connect: false  # 直接连接模式，不使用代理
+
+users:
+  neko: "123456"
+  k: "123" 

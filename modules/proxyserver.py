@@ -4,6 +4,7 @@ from asyncio import TimeoutError
 from itertools import cycle
 from config import getip
 from configparser import ConfigParser
+from modules.user_ip_manager import UserIPManager
 
 
 def load_proxies(file_path='ip.txt'):
@@ -44,6 +45,18 @@ class AsyncProxyServer:
         if 'Users' in config:
             self.users = dict(config['Users'].items())
         self.auth_required = bool(self.users)
+        
+        # 用户IP管理配置
+        self.use_session_ip = config.get('use_session_ip', 'False').lower() == 'true'
+        self.session_duration = int(config.get('session_duration', '1800'))  # 默认30分钟
+        self.ip_pool_file = config.get('ip_pool_file', '')
+        
+        # 如果启用会话IP管理，初始化UserIPManager
+        if self.use_session_ip:
+            self.user_ip_manager = UserIPManager(
+                ip_pool_file=self.ip_pool_file if self.ip_pool_file else None,
+                session_duration=self.session_duration
+            )
         
         self.proxy_file = os.path.join('config', os.path.basename(config.get('proxy_file', 'ip.txt')))
         self.whitelist_file = os.path.join('config', os.path.basename(config.get('whitelist_file', 'whitelist.txt')))
@@ -223,6 +236,10 @@ class AsyncProxyServer:
                 self.tasks.add(asyncio.create_task(self._cleanup_pool()))
                 self.tasks.add(asyncio.create_task(self.cleanup_disconnected_ips()))
                 
+                # 如果启用了会话IP管理，添加定期清理过期会话的任务
+                if self.use_session_ip:
+                    self.tasks.add(asyncio.create_task(self._cleanup_expired_sessions()))
+                
                 if hasattr(os, 'sched_setaffinity'):
                     try:
                         os.sched_setaffinity(0, range(os.cpu_count()))
@@ -342,28 +359,64 @@ class AsyncProxyServer:
             return False
 
     def _authenticate(self, headers):
+        """验证用户身份，支持用户名密码和会话ID认证"""
         if not self.auth_required:
             return True
             
-        auth_header = headers.get('proxy-authorization', '')
+        auth_header = headers.get('Proxy-Authorization', '')
         if not auth_header:
+            logging.debug("Missing Proxy-Authorization header")
             return False
             
         try:
-            scheme, credentials = auth_header.split()
-            if scheme.lower() != 'basic':
+            auth_type, auth_data = auth_header.split(' ', 1)
+            if auth_type.lower() != 'basic':
+                logging.debug(f"Unsupported auth type: {auth_type}")
                 return False
                 
-            decoded = base64.b64decode(credentials).decode()
-            username, password = decoded.split(':')
+            # 解码认证数据
+            auth_decoded = base64.b64decode(auth_data).decode('utf-8')
             
-            if username in self.users and self.users[username] == password:
-                return username, password
+            # 支持两种认证方式: 1. 用户名-参数格式  2. 用户名:密码格式
+            if self.use_session_ip and '-' in auth_decoded:
+                # 使用新的参数解析方法
+                username, params = self.user_ip_manager.parse_auth_params(auth_decoded)
                 
-        except Exception:
-            pass
+                # 验证用户名是否在用户列表中
+                if not username or username not in self.users:
+                    logging.debug(f"User not found or invalid: {username}")
+                    return False
+                
+                # 提取会话ID (如果存在)
+                session_id = self.user_ip_manager.get_session_id_from_params(username, params)
+                
+                if not session_id and 'session_id' in params:
+                    # 兼容旧方式，如果没有组合会话ID但有session_id参数
+                    session_id = f"{username}_{params['session_id']}"
+                
+                if session_id:
+                    # 为该会话分配一个IP（或获取已分配的IP）
+                    user_ip = self.user_ip_manager.get_user_ip(username, session_id)
+                    logging.info(f"用户 {username} 认证字符串 [{auth_decoded}] 参数 {params} 会话ID [{session_id}] 使用IP: {user_ip}")
+                    
+                    # 认证成功
+                    return True
+                else:
+                    logging.debug(f"No session_id parameter found in auth string: {auth_decoded}")
             
-        return False
+            # 标准用户名密码认证
+            if ':' in auth_decoded:
+                username, password = auth_decoded.split(':', 1)
+                if username in self.users and self.users[username] == password:
+                    return True
+                else:
+                    logging.debug(f"Invalid credentials for user: {username}")
+            
+            return False
+                
+        except Exception as e:
+            logging.error(f"Authentication error: {str(e)}")
+            return False
 
     async def _close_connection(self, writer):
         try:
@@ -592,7 +645,7 @@ class AsyncProxyServer:
                     retry_count += 1
                     if retry_count < max_retries:
                         await asyncio.sleep(1)
-                    continue
+                        continue
                     
                 except Exception as e:
                     last_error = e
@@ -601,7 +654,7 @@ class AsyncProxyServer:
                     retry_count += 1
                     if retry_count < max_retries:
                         await asyncio.sleep(1)
-                    continue
+                        continue
 
             #if last_error:
                 #logging.error(get_message('all_retries_failed', self.language, str(last_error)))
@@ -774,8 +827,15 @@ class AsyncProxyServer:
                             self.known_clients.add(client_key)
                             logging.info(get_message('new_client_connect', self.language, client_ip, f"{username}:{password}"))
 
+            # 检查认证并获取会话ID和参数
+            is_authenticated, session_id, params = await self._authenticate_with_session(headers)
+            if not is_authenticated:
+                writer.write(b'HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm="Proxy"\r\n\r\n')
+                await writer.drain()
+                return
+
             if method == 'CONNECT':
-                await self._handle_connect(path, reader, writer)
+                await self._handle_connect(path, reader, writer, session_id, params)
             else:
                 await self._handle_request(method, path, headers, reader, writer)
 
@@ -788,144 +848,46 @@ class AsyncProxyServer:
                                 asyncio.CancelledError, asyncio.TimeoutError)):
                 logging.error(get_message('client_request_error', self.language, str(e)))
 
-    async def _handle_connect(self, path, reader, writer):
-        try:
-            host, port = path.split(':')
-            port = int(port)
-        except ValueError:
-            writer.write(b'HTTP/1.1 400 Bad Request\r\n\r\n')
+    async def _handle_request(self, method, path, headers, reader, writer):
+        """处理HTTP请求"""
+        client_addr = writer.get_extra_info('peername')
+        client_ip = client_addr[0] if client_addr else 'unknown'
+        
+        # 检查认证并获取会话ID和参数
+        is_authenticated, session_id, params = await self._authenticate_with_session(headers)
+        if not is_authenticated:
+            response = (
+                'HTTP/1.1 407 Proxy Authentication Required\r\n'
+                'Proxy-Authenticate: Basic realm="ProxyCt"\r\n'
+                'Content-Length: 0\r\n'
+                '\r\n'
+            )
+            writer.write(response.encode())
             await writer.drain()
             return
-
-        max_retries = 1 
-        retry_count = 0
-        last_error = None
         
-        while retry_count < max_retries:
-            try:
-                proxy = await self.get_next_proxy()
-                if not proxy:
-                    writer.write(b'HTTP/1.1 503 Service Unavailable\r\n\r\n')
-                    await writer.drain()
-                    return
-
-                try:
-                    proxy_type, proxy_addr = proxy.split('://')
-                    proxy_auth, proxy_host_port = self._split_proxy_auth(proxy_addr)
-                    proxy_host, proxy_port = proxy_host_port.split(':')
-                    proxy_port = int(proxy_port)
-
-                    remote_reader, remote_writer = await asyncio.wait_for(
-                        asyncio.open_connection(proxy_host, proxy_port), 
-                        timeout=10
-                    )
-
-                    if proxy_type == 'http':
-                        connect_headers = [f'CONNECT {host}:{port} HTTP/1.1', f'Host: {host}:{port}']
-                        if proxy_auth:
-                            auth_header = f'Proxy-Authorization: Basic {base64.b64encode(proxy_auth.encode()).decode()}'
-                            connect_headers.append(auth_header)
-                        connect_request = '\r\n'.join(connect_headers) + '\r\n\r\n'
-                        remote_writer.write(connect_request.encode())
-                        await remote_writer.drain()
-                        response = await remote_reader.readline()
-                        if not response.startswith(b'HTTP/1.1 200'):
-                            
-                            await self.handle_proxy_failure()
-                            last_error = f"Bad Gateway: {response.decode('utf-8', errors='ignore')}"
-                            retry_count += 1
-                            if retry_count < max_retries:
-                                logging.warning(get_message('request_retry', self.language, max_retries - retry_count))
-                                await asyncio.sleep(1)
-                                continue
-                            raise Exception("Bad Gateway")
-                        while (await remote_reader.readline()) != b'\r\n':
-                            pass
-                    elif proxy_type == 'socks5':
-                        remote_writer.write(b'\x05\x01\x00')
-                        await remote_writer.drain()
-                        if (await remote_reader.read(2))[1] == 0:
-                            remote_writer.write(b'\x05\x01\x00\x03' + len(host).to_bytes(1, 'big') + host.encode() + port.to_bytes(2, 'big'))
-                        await remote_writer.drain()
-                        if (await remote_reader.read(10))[1] != 0:
-                            
-                            await self.handle_proxy_failure()
-                            last_error = "SOCKS5 connection failed"
-                            retry_count += 1
-                            if retry_count < max_retries:
-                                logging.warning(get_message('request_retry', self.language, max_retries - retry_count))
-                                await asyncio.sleep(1)
-                                continue
-                            raise Exception("Bad Gateway")
-                    else:
-                        raise Exception("Unsupported proxy type")
-
-                    writer.write(b'HTTP/1.1 200 Connection Established\r\n\r\n')
-                    await writer.drain()
-
-                    await asyncio.gather(
-                        self._pipe(reader, remote_writer),
-                        self._pipe(remote_reader, writer)
-                    )
-                    
-                    
-                    return
-                    
-                except asyncio.TimeoutError:
-                    
-                    await self.handle_proxy_failure()
-                    last_error = "Connection Timeout"
-                    retry_count += 1
-                    if retry_count < max_retries:
-                        logging.warning(get_message('request_retry', self.language, max_retries - retry_count))
-                        await asyncio.sleep(1)
-                        continue
-                    logging.error(get_message('connect_timeout', self.language))
-                    writer.write(b'HTTP/1.1 504 Gateway Timeout\r\n\r\n')
-                    await writer.drain()
-                    return
-                except Exception as e:
-                    
-                    await self.handle_proxy_failure()
-                    last_error = str(e)
-                    retry_count += 1
-                    if retry_count < max_retries:
-                        logging.warning(get_message('request_retry', self.language, max_retries - retry_count))
-                        await asyncio.sleep(1)
-                        continue
-                    writer.write(b'HTTP/1.1 502 Bad Gateway\r\n\r\n')
-                    await writer.drain()
-                    return
-                
-            except Exception as e:
-                last_error = str(e)
-                retry_count += 1
-                if retry_count < max_retries:
-                    logging.warning(get_message('request_retry', self.language, max_retries - retry_count))
-                    await asyncio.sleep(1)
-                    continue
-                writer.write(b'HTTP/1.1 502 Bad Gateway\r\n\r\n')
+        # 根据请求方法处理
+        if method == 'CONNECT':
+            await self._handle_connect(path, reader, writer, session_id, params)
+        else:
+            # 获取代理（可能是会话特定的）
+            if self.use_session_ip and session_id:
+                proxy = await self.get_session_proxy(session_id, client_ip, params)
+            else:
+                proxy = await self.get_proxy()
+            
+            if not proxy:
+                response = 'HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n'
+                writer.write(response.encode())
                 await writer.drain()
                 return
+
+            async with self.request_semaphore:
+                max_retries = 1 
+                retry_count = 0
+                last_error = None
                 
-        
-        #if last_error:
-            #logging.error(get_message('all_retries_failed', self.language, last_error))
-
-    async def _handle_request(self, method, path, headers, reader, writer):
-        async with self.request_semaphore:
-            max_retries = 1 
-            retry_count = 0
-            last_error = None
-            
-            while retry_count < max_retries:
-                try:
-                    proxy = await self.get_next_proxy()
-                    if not proxy:
-                        writer.write(b'HTTP/1.1 503 Service Unavailable\r\n\r\n')
-                        await writer.drain()
-                        return
-
+                while retry_count < max_retries:
                     try:
                         client = await self._get_client(proxy)
                         
@@ -969,12 +931,10 @@ class AsyncProxyServer:
                                     return 
                                 except Exception:
                                     pass
-                                    
                                 
                                 return
 
                         except httpx.RequestError:
-                            
                             await self.handle_proxy_failure()
                             last_error = "Request Error"
                             retry_count += 1
@@ -982,10 +942,10 @@ class AsyncProxyServer:
                                 logging.warning(get_message('request_retry', self.language, max_retries - retry_count))
                                 await asyncio.sleep(1)
                                 continue
-                            return 
+                            # 达到最大重试次数
+                            break
                         except Exception as e:
                             if isinstance(e, (ConnectionError, ConnectionResetError, ConnectionAbortedError)):
-                                
                                 await self.handle_proxy_failure()
                                 last_error = str(e)
                                 retry_count += 1
@@ -993,14 +953,13 @@ class AsyncProxyServer:
                                     logging.warning(get_message('request_retry', self.language, max_retries - retry_count))
                                     await asyncio.sleep(1)
                                     continue
-                                return 
+                                # 达到最大重试次数
+                                break
                             writer.write(b'HTTP/1.1 502 Bad Gateway\r\n\r\n')
                             await writer.drain()
                             return
 
-
                     except httpx.HTTPError:
-                        
                         await self.handle_proxy_failure()
                         last_error = "HTTP Error"
                         retry_count += 1
@@ -1008,10 +967,10 @@ class AsyncProxyServer:
                             logging.warning(get_message('request_retry', self.language, max_retries - retry_count))
                             await asyncio.sleep(1)
                             continue
-                        return 
+                        # 达到最大重试次数
+                        break
                     except Exception as e:
                         if isinstance(e, (ConnectionError, ConnectionResetError, ConnectionAbortedError)):
-                            
                             await self.handle_proxy_failure()
                             last_error = str(e)
                             retry_count += 1
@@ -1019,60 +978,194 @@ class AsyncProxyServer:
                                 logging.warning(get_message('request_retry', self.language, max_retries - retry_count))
                                 await asyncio.sleep(1)
                                 continue
-                            return 
+                            # 达到最大重试次数
+                            break
                         writer.write(b'HTTP/1.1 502 Bad Gateway\r\n\r\n')
                         await writer.drain()
                         return
 
+                # 如果到达这里，表示达到最大重试次数并且失败
+                if last_error:
+                    logging.error(get_message('all_retries_failed', self.language, last_error))
+                writer.write(b'HTTP/1.1 502 Bad Gateway\r\n\r\n')
+                await writer.drain()
 
-                except Exception as e:
-                    if isinstance(e, (ConnectionError, ConnectionResetError, ConnectionAbortedError)):
-                        
-                        await self.handle_proxy_failure()
-                        last_error = str(e)
-                        retry_count += 1
-                        if retry_count < max_retries:
-                            logging.warning(get_message('request_retry', self.language, max_retries - retry_count))
-                            await asyncio.sleep(1)
-                            continue
-                        return 
-                    if not isinstance(e, (asyncio.CancelledError,)):
-                        logging.error(f"请求处理错误: {str(e)}") 
-                    try:
-                        writer.write(b'HTTP/1.1 502 Bad Gateway\r\n\r\n')
-                        await writer.drain()
-                    except:
-                        pass
-                    return
+    async def _handle_connect(self, path, reader, writer, session_id=None, params=None):
+        """处理CONNECT请求"""
+        try:
+            host, port = path.split(':', 1)
+            port = int(port)
+            
+            client_addr = writer.get_extra_info('peername')
+            client_ip = client_addr[0] if client_addr else 'unknown'
+            
+            # 获取代理（可能是会话特定的）
+            if self.use_session_ip and session_id:
+                proxy = await self.get_session_proxy(session_id, client_ip, params)
+            else:
+                proxy = await self.get_proxy()
+            
+            if not proxy:
+                response = 'HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n'
+                writer.write(response.encode())
+                await writer.drain()
+                return
+
+            proxy_type, proxy_addr = proxy.split('://')
+            proxy_auth, proxy_host_port = self._split_proxy_auth(proxy_addr)
+            proxy_host, proxy_port = proxy_host_port.split(':')
+            proxy_port = int(proxy_port)
+            
+            remote_reader, remote_writer = await asyncio.wait_for(
+                asyncio.open_connection(proxy_host, proxy_port),
+                timeout=10
+            )
+
+            if proxy_type == 'http':
+                connect_headers = [f'CONNECT {host}:{port} HTTP/1.1', f'Host: {host}:{port}']
+                if proxy_auth:
+                    auth_header = f'Proxy-Authorization: Basic {base64.b64encode(proxy_auth.encode()).decode()}'
+                    connect_headers.append(auth_header)
+                connect_request = '\r\n'.join(connect_headers) + '\r\n\r\n'
+                remote_writer.write(connect_request.encode())
+                await remote_writer.drain()
+                response = await remote_reader.readline()
+                if not response.startswith(b'HTTP/1.1 200'):
                     
-            #if last_error:
-                logging.error(get_message('all_retries_failed', self.language, last_error))
+                    await self.handle_proxy_failure()
+                    last_error = f"Bad Gateway: {response.decode('utf-8', errors='ignore')}"
+                    writer.write(b'HTTP/1.1 502 Bad Gateway\r\n\r\n')
+                    await writer.drain()
+                    return
+                while (await remote_reader.readline()) != b'\r\n':
+                    pass
+            elif proxy_type == 'socks5':
+                remote_writer.write(b'\x05\x01\x00')
+                await remote_writer.drain()
+                if (await remote_reader.read(2))[1] == 0:
+                    remote_writer.write(b'\x05\x01\x00\x03' + len(host).to_bytes(1, 'big') + host.encode() + port.to_bytes(2, 'big'))
+                await remote_writer.drain()
+                if (await remote_reader.read(10))[1] != 0:
+                    
+                    await self.handle_proxy_failure()
+                    last_error = "SOCKS5 connection failed"
+                    writer.write(b'HTTP/1.1 502 Bad Gateway\r\n\r\n')
+                    await writer.drain()
+                    return
+            else:
+                raise Exception("Unsupported proxy type")
 
-    async def _get_client(self, proxy):
-        async with self.client_pool_lock:
-            current_time = time.time()
-            if proxy in self.client_pool:
-                client, last_used = self.client_pool[proxy]
-                if current_time - last_used < 30 and not client.is_closed:
-                    self.client_pool[proxy] = (client, current_time)
-                    return client
-                else:
-                    await client.aclose()
-                    del self.client_pool[proxy]
+            writer.write(b'HTTP/1.1 200 Connection Established\r\n\r\n')
+            await writer.drain()
 
-            try:
-                client = await self._create_client(proxy)
-                if len(self.client_pool) >= self.max_pool_size:
-                    oldest_proxy = min(self.client_pool, key=lambda x: self.client_pool[x][1])
-                    old_client, _ = self.client_pool[oldest_proxy]
-                    await old_client.aclose()
-                    del self.client_pool[oldest_proxy]
+            await asyncio.gather(
+                self._pipe(reader, remote_writer),
+                self._pipe(remote_reader, writer)
+            )
+            
+            return
+            
+        except Exception as e:
+            logging.error(get_message('connect_error', self.language, str(e)))
+            writer.write(b'HTTP/1.1 502 Bad Gateway\r\n\r\n')
+            await writer.drain()
+
+    async def _authenticate_with_session(self, headers):
+        """从认证头中提取会话ID和其他参数"""
+        if not self.auth_required:
+            return True, None, {}
+            
+        auth_header = headers.get('Proxy-Authorization', '')
+        if not auth_header:
+            return False, None, {}
+            
+        try:
+            auth_type, auth_data = auth_header.split(' ', 1)
+            if auth_type.lower() != 'basic':
+                return False, None, {}
                 
-                self.client_pool[proxy] = (client, current_time)
-                return client
-            except Exception as e:
-                logging.error(f"创建客户端失败: {str(e)}")
-                raise
+            # 解码认证数据
+            auth_decoded = base64.b64decode(auth_data).decode('utf-8')
+            
+            # 检查是否包含参数分隔符
+            if self.use_session_ip and '-' in auth_decoded:
+                # 解析参数
+                username, params = self.user_ip_manager.parse_auth_params(auth_decoded)
+                
+                # 验证用户名
+                if not username or username not in self.users:
+                    return False, None, {}
+                
+                # 获取会话ID
+                session_id = self.user_ip_manager.get_session_id_from_params(username, params)
+                
+                if not session_id and 'session_id' in params:
+                    # 兼容旧方式
+                    session_id = f"{username}_{params['session_id']}"
+                
+                return True, session_id, params
+            
+            # 如果是标准用户名:密码格式
+            if ':' in auth_decoded:
+                username, password = auth_decoded.split(':', 1)
+                if username in self.users and self.users[username] == password:
+                    return True, None, {}
+            
+            # 认证失败或不包含会话信息
+            return False, None, {}
+                
+        except Exception as e:
+            logging.error(f"Authentication error: {str(e)}")
+            return False, None, {}
+
+    async def get_session_proxy(self, session_id, client_ip=None, params=None):
+        """
+        基于会话ID获取代理IP
+        
+        Args:
+            session_id: 用户会话ID
+            client_ip: 客户端IP地址，用于日志
+            params: 可选的参数字典，包含其他从认证中解析的参数
+            
+        Returns:
+            str: 分配给会话的代理IP
+        """
+        if not self.use_session_ip or not hasattr(self, 'user_ip_manager'):
+            return await self.get_proxy()
+            
+        # 如果session_id为空，使用默认代理
+        if not session_id:
+            return await self.get_proxy()
+        
+        # 不需要再解析session_id，因为现在它已经是处理过的格式
+        # 从session_id中提取用户名（如果有必要）
+        username = session_id.split("_")[0] if "_" in session_id else ""
+            
+        # 获取分配给此会话的IP
+        session_ip = self.user_ip_manager.get_user_ip(username, session_id)
+        
+        if client_ip:
+            if params:
+                logging.info(f"客户端 {client_ip} 的会话 [{session_id}] 参数 {params} 使用IP: {session_ip}")
+            else:
+                logging.info(f"客户端 {client_ip} 的会话 [{session_id}] 使用IP: {session_ip}")
+            
+        # 返回形如 http://IP:PORT 的代理地址
+        proxy_type = "http"  # 默认使用HTTP代理类型
+        proxy_port = "8080"  # 默认端口
+        
+        # 如果当前代理不为空，可以从中提取代理类型
+        if self.current_proxy:
+            match = re.match(r'^(https?|socks5)://', self.current_proxy)
+            if match:
+                proxy_type = match.group(1)
+                
+            # 尝试提取端口
+            port_match = re.search(r':(\d+)$', self.current_proxy)
+            if port_match:
+                proxy_port = port_match.group(1)
+        
+        return f"{proxy_type}://{session_ip}:{proxy_port}"
 
     async def handle_proxy_failure(self):
         
@@ -1391,45 +1484,28 @@ class AsyncProxyServer:
             return False
 
     async def get_proxy(self):
-        try:
-            old_proxy = self.current_proxy
-            temp_current_proxy = self.current_proxy
+        """获取一个代理（根据配置使用不同的方式）"""
+        if self.use_getip:
+            # 使用API获取IP
+            return await self._load_getip_proxy()
+        elif self.mode == 'loadbalance':
+            # 负载均衡模式：随机选择代理
+            if not self.proxies:
+                return None
+            return random.choice(self.proxies)
+        else:
+            # 循环模式：依次使用代理列表中的代理
+            current_time = time.time()
+            if current_time - self.last_switch_time >= self.interval and not self.switching_proxy:
+                # 是时候切换到下一个代理
+                async with self.proxy_failure_lock:
+                    if current_time - self.last_switch_time >= self.interval and not self.switching_proxy:
+                        self.switching_proxy = True
+                        try:
+                            await self.switch_proxy()
+                        finally:
+                            self.switching_proxy = False
             
-            if not self.use_getip and self.proxies:
-                if not self.proxy_cycle:
-                    self.proxy_cycle = cycle(self.proxies)
-                    
-                for _ in range(3):
-                    new_proxy = next(self.proxy_cycle)
-                    if await self._validate_proxy(new_proxy):
-                        self.current_proxy = new_proxy
-                        self.last_switch_time = time.time()
-                        if temp_current_proxy != self.current_proxy:
-                            self._log_proxy_switch(old_proxy, self.current_proxy)
-                        return self.current_proxy
-                        
-                logging.error(get_message('no_valid_proxies', self.language))
-                return self.current_proxy
-            
-            if self.use_getip:
-                try:
-                    new_proxy = await self._load_getip_proxy()
-                    if new_proxy and await self._validate_proxy(new_proxy):
-
-                        self.current_proxy = new_proxy
-                        self.last_switch_time = time.time()
-                        if temp_current_proxy != self.current_proxy:
-                            self._log_proxy_switch(old_proxy, self.current_proxy)
-                        return self.current_proxy
-                    else:
-                        logging.error(get_message('proxy_get_failed', self.language))
-                except Exception as e:
-                    logging.error(get_message('proxy_get_error', self.language, str(e)))
-            
-            return self.current_proxy
-            
-        except Exception as e:
-            logging.error(get_message('proxy_get_error', self.language, str(e)))
             return self.current_proxy
 
     async def cleanup_clients(self):
@@ -1464,3 +1540,44 @@ class AsyncProxyServer:
                 except Exception:
                     continue
         return active
+
+    async def _cleanup_expired_sessions(self):
+        """定期清理过期的会话"""
+        while not self.stop_server:
+            try:
+                # 每10分钟清理一次过期会话
+                await asyncio.sleep(600)
+                if self.use_session_ip:
+                    self.user_ip_manager.cleanup_expired_sessions()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logging.error(f"清理过期会话时出错: {str(e)}")
+                await asyncio.sleep(60)  # 出错后等待一分钟再试
+
+    async def _get_client(self, proxy):
+        """获取一个HTTPX客户端实例，用于发送HTTP请求"""
+        async with self.client_pool_lock:
+            current_time = time.time()
+            if proxy in self.client_pool:
+                client, last_used = self.client_pool[proxy]
+                if current_time - last_used < 30 and not client.is_closed:
+                    self.client_pool[proxy] = (client, current_time)
+                    return client
+                else:
+                    await client.aclose()
+                    del self.client_pool[proxy]
+
+            try:
+                client = await self._create_client(proxy)
+                if len(self.client_pool) >= self.max_pool_size:
+                    oldest_proxy = min(self.client_pool, key=lambda x: self.client_pool[x][1])
+                    old_client, _ = self.client_pool[oldest_proxy]
+                    await old_client.aclose()
+                    del self.client_pool[oldest_proxy]
+                
+                self.client_pool[proxy] = (client, current_time)
+                return client
+            except Exception as e:
+                logging.error(f"创建客户端失败: {str(e)}")
+                raise
